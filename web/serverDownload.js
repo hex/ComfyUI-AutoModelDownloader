@@ -447,43 +447,143 @@ window.serverDownload = {
     states: downloadStates
 };
 
-// Helper to inject buttons using MutationObserver
-function setupDialogObserver() {
-    console.log('[AutoModelDownloader] Setting up dialog observer');
+// Intercept browser downloads and redirect to server-side download.
+// ComfyUI's Workflow Overview creates <a href="..." download="..."> and clicks it.
+// We wrap HTMLAnchorElement.prototype.click to capture the URL.
+function setupDownloadInterceptor() {
+    console.log('[AutoModelDownloader] Setting up download interceptor');
 
-    // Watch for the missing models dialog to appear
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function() {
+        // Only intercept model downloads (have download attribute + model file extension)
+        if (this.href && this.hasAttribute('download')) {
+            const filename = this.download || this.href.split('/').pop().split('?')[0];
+            const modelExts = ['.safetensors', '.ckpt', '.bin', '.gguf', '.sft', '.pth', '.pt'];
+            const isModel = modelExts.some(ext => filename.toLowerCase().endsWith(ext));
+
+            if (isModel) {
+                console.log(`[AutoModelDownloader] Intercepted download: ${filename}`);
+                console.log(`[AutoModelDownloader] URL: ${this.href}`);
+
+                // Guess save_path from URL path segments or filename
+                const savePath = guessModelType(this.href, filename);
+                console.log(`[AutoModelDownloader] Save path: ${savePath}`);
+
+                // Start server-side download instead of browser download
+                startServerDownload(this.href, savePath, filename);
+                showDownloadNotification(filename, savePath);
+                return; // Prevent browser download
+            }
+        }
+        return origClick.call(this);
+    };
+
+    console.log('[AutoModelDownloader] Download interceptor active');
+}
+
+// Guess the model type/directory from URL path or filename
+function guessModelType(url, filename) {
+    const urlLower = url.toLowerCase();
+    const fnameLower = filename.toLowerCase();
+
+    // Check URL path segments for known model types
+    const typeMap = {
+        'diffusion_models': 'diffusion_models',
+        'checkpoints': 'checkpoints',
+        'loras': 'loras',
+        'lora': 'loras',
+        'vae': 'vae',
+        'text_encoders': 'text_encoders',
+        'text_encoder': 'text_encoders',
+        'clip': 'clip',
+        'clip_vision': 'clip_vision',
+        'controlnet': 'controlnet',
+        'upscale_models': 'upscale_models',
+        'embeddings': 'embeddings',
+        'unet': 'unet',
+    };
+
+    // Search URL path for model type
+    for (const [pattern, dir] of Object.entries(typeMap)) {
+        if (urlLower.includes('/' + pattern + '/') || urlLower.includes('/' + pattern + '?')) {
+            return dir;
+        }
+    }
+
+    // Search filename for hints
+    if (fnameLower.includes('lora')) return 'loras';
+    if (fnameLower.includes('vae')) return 'vae';
+    if (fnameLower.includes('clip')) return 'clip';
+    if (fnameLower.includes('controlnet')) return 'controlnet';
+    if (fnameLower.includes('upscale')) return 'upscale_models';
+    if (fnameLower.includes('embedding')) return 'embeddings';
+    if (fnameLower.includes('text_encoder')) return 'text_encoders';
+
+    // Also check the Workflow Overview section header if available
+    try {
+        const items = document.querySelectorAll('.flex.w-full.flex-col.pb-3');
+        for (const item of items) {
+            const nameEl = item.querySelector('p[title]');
+            if (nameEl && nameEl.getAttribute('title') === filename) {
+                const section = item.closest('.flex.flex-col.gap-1.overflow-hidden');
+                if (section) {
+                    const header = section.previousElementSibling;
+                    const headerText = header?.textContent?.trim() || '';
+                    // Extract type from "diffusion_models (1)" -> "diffusion_models"
+                    const match = headerText.match(/^\s*(\S+)/);
+                    if (match && typeMap[match[1]]) return typeMap[match[1]];
+                    if (match) return match[1];
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('[AutoModelDownloader] Could not determine type from sidebar:', e);
+    }
+
+    return 'checkpoints'; // fallback
+}
+
+// Show a toast notification when download starts
+function showDownloadNotification(filename, savePath) {
+    const toast = document.createElement('div');
+    toast.style.cssText =
+        'position:fixed;bottom:20px;right:20px;z-index:99999;' +
+        'background:#1a7f37;color:white;padding:12px 20px;border-radius:8px;' +
+        'font:14px sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.3);' +
+        'max-width:400px;word-break:break-all;';
+    const title = document.createElement('strong');
+    title.textContent = 'Downloading to server';
+    const nameText = document.createElement('div');
+    nameText.textContent = filename;
+    const pathText = document.createElement('small');
+    pathText.textContent = savePath + '/';
+    toast.appendChild(title);
+    toast.appendChild(nameText);
+    toast.appendChild(pathText);
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+}
+
+// Legacy dialog observer (kept for older ComfyUI versions)
+function setupDialogObserver() {
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             if (mutation.addedNodes.length) {
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType === Node.ELEMENT_NODE) {
-                        // Check for both old (.comfy-missing-models) and new (#global-missing-models-warning) dialog
                         const hasDialog = node.querySelector && (
                             node.querySelector('.comfy-missing-models') ||
-                            node.classList?.contains('comfy-missing-models') ||
-                            node.querySelector('#global-missing-models-warning') ||
-                            node.id === 'global-missing-models-warning'
+                            node.querySelector('#global-missing-models-warning')
                         );
-
                         if (hasDialog) {
-                            console.log('[AutoModelDownloader] Detected missing models dialog, injecting buttons...');
-                            setTimeout(() => {
-                                injectServerDownloadButtons();
-                            }, 500);
+                            setTimeout(() => injectServerDownloadButtons(), 500);
                         }
                     }
                 });
             }
         }
     });
-
-    // Start observing the document body for dialog additions
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
-
-    console.log('[AutoModelDownloader] Observer active');
+    observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function findModelListContainer() {
@@ -725,16 +825,18 @@ app.registerExtension({
     async setup() {
         console.log("[AutoModelDownloader] Extension setup starting");
 
-        // Set up observer to watch for missing models dialog
+        // Intercept anchor-based downloads (Workflow Overview panel)
+        setupDownloadInterceptor();
+
+        // Legacy: watch for old-style missing models dialogs
         setupDialogObserver();
 
-        // Also try to inject immediately if dialog already exists
+        // Legacy: try injecting into existing dialogs
         setTimeout(() => {
             console.log('[AutoModelDownloader] Checking for existing dialog...');
             injectServerDownloadButtons();
         }, 1000);
 
-        // Try again after a longer delay
         setTimeout(() => {
             console.log('[AutoModelDownloader] Second check for dialog...');
             injectServerDownloadButtons();
