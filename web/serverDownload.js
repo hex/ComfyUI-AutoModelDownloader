@@ -543,26 +543,109 @@ function guessModelType(url, filename) {
     return 'checkpoints'; // fallback
 }
 
-// Show a toast notification when download starts
-function showDownloadNotification(filename, savePath) {
-    const toast = document.createElement('div');
-    toast.style.cssText =
+// Floating progress panel for active downloads
+let progressPanel = null;
+const activeItems = new Map(); // download_id -> DOM elements
+
+function getOrCreateProgressPanel() {
+    if (progressPanel && document.body.contains(progressPanel)) return progressPanel;
+
+    progressPanel = document.createElement('div');
+    progressPanel.id = 'server-download-panel';
+    progressPanel.style.cssText =
         'position:fixed;bottom:20px;right:20px;z-index:99999;' +
-        'background:#1a7f37;color:white;padding:12px 20px;border-radius:8px;' +
-        'font:14px sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.3);' +
-        'max-width:400px;word-break:break-all;';
-    const title = document.createElement('strong');
-    title.textContent = 'Downloading to server';
-    const nameText = document.createElement('div');
-    nameText.textContent = filename;
-    const pathText = document.createElement('small');
-    pathText.textContent = savePath + '/';
-    toast.appendChild(title);
-    toast.appendChild(nameText);
-    toast.appendChild(pathText);
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 5000);
+        'background:#1e1e2e;color:#cdd6f4;padding:12px 16px;border-radius:10px;' +
+        'font:13px sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.5);' +
+        'max-width:420px;min-width:320px;border:1px solid #45475a;' +
+        'max-height:400px;overflow-y:auto;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:bold;margin-bottom:8px;font-size:14px;color:#a6e3a1;';
+    header.textContent = 'Server Downloads';
+    progressPanel.appendChild(header);
+
+    document.body.appendChild(progressPanel);
+    return progressPanel;
 }
+
+function showDownloadNotification(filename, savePath) {
+    const panel = getOrCreateProgressPanel();
+    const downloadId = `${savePath}/${filename}`;
+
+    // Create item row
+    const item = document.createElement('div');
+    item.style.cssText = 'margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #313244;';
+
+    const nameRow = document.createElement('div');
+    nameRow.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;';
+    const nameEl = document.createElement('span');
+    nameEl.style.cssText = 'font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;';
+    nameEl.textContent = filename;
+    nameEl.title = filename;
+    const statusEl = document.createElement('span');
+    statusEl.style.cssText = 'color:#f9e2af;font-size:12px;white-space:nowrap;margin-left:8px;';
+    statusEl.textContent = 'queued';
+    nameRow.appendChild(nameEl);
+    nameRow.appendChild(statusEl);
+
+    const barBg = document.createElement('div');
+    barBg.style.cssText = 'width:100%;height:6px;background:#313244;border-radius:3px;overflow:hidden;';
+    const barFill = document.createElement('div');
+    barFill.style.cssText = 'width:0%;height:100%;background:#89b4fa;border-radius:3px;transition:width 0.3s;';
+    barBg.appendChild(barFill);
+
+    const infoRow = document.createElement('div');
+    infoRow.style.cssText = 'display:flex;justify-content:space-between;margin-top:3px;font-size:11px;color:#6c7086;';
+    const sizeEl = document.createElement('span');
+    sizeEl.textContent = '';
+    const speedEl = document.createElement('span');
+    speedEl.textContent = '';
+    infoRow.appendChild(sizeEl);
+    infoRow.appendChild(speedEl);
+
+    item.appendChild(nameRow);
+    item.appendChild(barBg);
+    item.appendChild(infoRow);
+    panel.appendChild(item);
+
+    activeItems.set(downloadId, { item, barFill, statusEl, sizeEl, speedEl });
+}
+
+// Update progress panel from WebSocket events
+window.addEventListener('serverDownloadUpdate', (e) => {
+    const { download_id, status, progress, downloaded, total, speed, error, path } = e.detail;
+    const ui = activeItems.get(download_id);
+    if (!ui) return;
+
+    if (status === 'downloading') {
+        ui.barFill.style.width = progress + '%';
+        ui.barFill.style.background = '#89b4fa';
+        ui.statusEl.textContent = Math.round(progress) + '%';
+        ui.statusEl.style.color = '#89b4fa';
+        ui.sizeEl.textContent = formatBytes(downloaded) + ' / ' + formatBytes(total);
+        ui.speedEl.textContent = speed || '';
+    } else if (status === 'completed') {
+        ui.barFill.style.width = '100%';
+        ui.barFill.style.background = '#a6e3a1';
+        ui.statusEl.textContent = 'done';
+        ui.statusEl.style.color = '#a6e3a1';
+        ui.speedEl.textContent = '';
+        // Remove after 10s
+        setTimeout(() => {
+            ui.item.remove();
+            activeItems.delete(download_id);
+            if (activeItems.size === 0 && progressPanel) {
+                progressPanel.remove();
+                progressPanel = null;
+            }
+        }, 10000);
+    } else if (status === 'error') {
+        ui.barFill.style.background = '#f38ba8';
+        ui.statusEl.textContent = 'error';
+        ui.statusEl.style.color = '#f38ba8';
+        ui.speedEl.textContent = error || '';
+    }
+});
 
 // Legacy dialog observer (kept for older ComfyUI versions)
 function setupDialogObserver() {
